@@ -1,0 +1,577 @@
+##############################################################
+# Fildelity of QT with CNOT and Hadamard gate
+##############################################################
+import numpy as np
+from qiskit import QuantumCircuit
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
+from qiskit_experiments.library import StateTomography
+from qiskit.quantum_info import Statevector, state_fidelity
+
+# ---------------------------------------------------------------------------
+# 1. Initialization and Parameter Setup
+# ---------------------------------------------------------------------------
+np.random.seed(42)
+theta = np.random.uniform(0.0, np.pi)
+varphi = np.random.uniform(0.0, 2 * np.pi)
+
+# Provide your IBM Cloud API key and Instance CRN
+service = QiskitRuntimeService(
+    channel="ibm_cloud",
+    token="",  # Add your 44-character API_KEY here
+    instance='' # Add your Instance CRN here
+)
+
+# Select the backend
+backend = service.backend("ibm_fez")
+print(f"Running on: {backend.name}\n")
+
+
+# ---------------------------------------------------------------------------
+# 2. Hardware Run Function
+# ---------------------------------------------------------------------------
+def run_teleportation_hardware(input_state_vector, backend_obj):
+    # Create Circuit
+    qc = QuantumCircuit(3, 2)
+    qc.u(theta, varphi, 0.0, 0) # Qubit 0 state prep
+    qc.barrier()
+    
+    # Bell pair (Q1 and Q2)
+    qc.h(1)
+    qc.cx(1, 2)
+    qc.barrier()
+    
+    # Alice's gates
+    qc.cx(0, 1)
+    qc.h(0)
+    
+    # Mid-circuit measurements
+    qc.measure(0, 0)
+    qc.measure(1, 1)
+    qc.barrier()
+    
+    # Bob's corrections (Dynamic Circuits)
+    with qc.if_test((qc.clbits[1], 1)):
+        qc.x(2)
+    with qc.if_test((qc.clbits[0], 1)):
+        qc.z(2)
+    
+    # Setup State Tomography on Bob's qubit (index 2)
+    tomo_exp = StateTomography(qc, physical_qubits=(0, 1, 2), measurement_indices=[2])
+    tomo_exp.set_transpile_options(optimization_level=3)
+
+    # Execute using the Runtime Sampler V2
+    sampler = Sampler(mode=backend_obj)
+    tomo_data = tomo_exp.run(backend_obj, sampler=sampler, shots=4096).block_for_results()
+    
+    # Extract Results and Compute Fidelity
+    rho_fit = tomo_data.analysis_results("state").value
+    target_state = Statevector(input_state_vector)
+    fidelity = state_fidelity(target_state, rho_fit)
+    
+    return fidelity, rho_fit
+
+
+# ---------------------------------------------------------------------------
+# 3. Multi-Run Averaging Protocol 
+# ---------------------------------------------------------------------------
+def run_multi_trial_experiment(input_state_vector, backend_obj, num_trials=5):
+    """
+    Executes N independent runs to determine standard error of the mean (SEM).
+    """
+    fidelities = []
+    print(f"Beginning Multi-Run Execution (N = {num_trials} trials)...")
+    
+    for trial in range(1, num_trials + 1):
+        fid, _ = run_teleportation_hardware(input_state_vector, backend_obj)
+        fidelities.append(fid)
+        print(f"  Trial {trial}/{num_trials} Fidelity: {fid:.5f}")
+    
+    fidelities = np.array(fidelities)
+    
+    # 1. Calculate Mean
+    mean_fidelity = np.mean(fidelities)
+    
+    # 2. Calculate Sample Standard Deviation (ddof=1 for unbiased estimator)
+    std_dev = np.std(fidelities, ddof=1)
+    
+    # 3. Calculate Standard Error of the Mean (SEM)
+    sem = std_dev / np.sqrt(num_trials)
+    
+    return mean_fidelity, std_dev, sem, fidelities
+
+
+# ---------------------------------------------------------------------------
+# 4. Execution & Results
+# ---------------------------------------------------------------------------
+input_state = [1 / np.sqrt(2), 1 / np.sqrt(2)]  # |+> state
+NUM_TRIALS = 5  
+mean_fid, std_fid, sem_fid, raw_fidelities = run_multi_trial_experiment(
+    input_state_vector=input_state,
+    backend_obj=backend,
+    num_trials=NUM_TRIALS
+)
+
+print("\n" + "="*45)
+print("     FINAL EXPERIMENTAL RESULTS & ERROR ANALYSIS")
+print("="*45)
+print(f"Trials (N):               {NUM_TRIALS}")
+print(f"Mean Fidelity (F̄):        {mean_fid:.5f}")
+print(f"Standard Deviation (σ):   {std_fid:.5f}")
+print(f"Standard Error (SEM):     {sem_fid:.5f}")
+print("-" * 45)
+print(f"Reported Result (SEM):    {mean_fid:.5f} ± {sem_fid:.5f}")
+print(f"Reported Result (1σ):     {mean_fid:.5f} ± {std_fid:.5f}")
+print("="*45)
+
+##############################################################
+# Fildelity of QT with C tilde gate
+##############################################################
+
+
+import numpy as np
+from math import pi
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit.circuit.library import SGate, XGate, UnitaryGate
+from qiskit.quantum_info import Operator, Statevector, state_fidelity
+from qiskit_experiments.library import StateTomography
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
+
+# ---------------------------------------------------------------------------
+# 1. C-Tilde Gate Definition
+# ---------------------------------------------------------------------------
+# Define matrix C
+C = (1 / np.sqrt(2)) * np.array([
+    [-1, 0, 0, 1],
+    [0, 1, 1, 0],
+    [0, 1, -1, 0],
+    [1, 0, 0, 1]
+])
+
+u_final = UnitaryGate(C, label=r'$\tilde{C}$')
+
+# ---------------------------------------------------------------------------
+# 2. Initialization and Service Setup
+# ---------------------------------------------------------------------------
+np.random.seed(42)
+theta = np.random.uniform(0.0, np.pi)
+varphi = np.random.uniform(0.0, 2 * np.pi)
+
+service = QiskitRuntimeService(
+    channel="ibm_cloud",
+    token="",  # Add your 44-character API_KEY here
+    instance='' # Add your Instance CRN here
+)
+
+backend = service.backend("ibm_fez")
+print(f"Running on backend: {backend.name}\n")
+
+
+# ---------------------------------------------------------------------------
+# 3. C-Tilde Teleportation 
+# ---------------------------------------------------------------------------
+def run_ctilde_teleportation_hardware(input_state_vector, backend_obj):
+    # Registers
+    secret = QuantumRegister(1, "Q")
+    alice  = QuantumRegister(1, "A")
+    bob    = QuantumRegister(1, "B")
+    cA     = ClassicalRegister(2, "cA")  # Alice's 2 measurement bits
+    
+    qc = QuantumCircuit(secret, alice, bob, cA)
+
+    # State Preparation on secret qubit
+    qc.u(theta, varphi, 0.0, secret[0])
+    qc.barrier()
+
+    # Bell Pair Creation between Alice and Bob
+    qc.h(alice[0])
+    qc.cx(alice[0], bob[0])
+    qc.barrier()
+
+    # Apply C_tilde Joint Measurement/Entangling Gate
+    qc.unitary(u_final, [secret[0], alice[0]], label="C_tilde")
+    qc.barrier()
+
+    # Alice Measures her two qubits
+    qc.measure(secret[0], cA[0])
+    qc.measure(alice[0],  cA[1])
+    qc.barrier()
+
+    # Bob's Correction Logic (Conditional Dynamic Circuits)
+    with qc.if_test((cA, 0)):   # 00 -> Z
+        qc.z(bob[0])
+
+    with qc.if_test((cA, 1)):   # 01 -> X
+        qc.x(bob[0])
+
+    with qc.if_test((cA, 2)):   # 10 -> ZX
+        qc.z(bob[0])
+        qc.x(bob[0])
+
+    # 11 -> Identity (No correction needed)
+    qc.barrier()
+
+    # State Tomography setup on Bob's qubit (physical qubit index 2 corresponding to 'bob')
+    tomo_exp = StateTomography(qc, physical_qubits=(0, 1, 2), measurement_indices=[2])
+    tomo_exp.set_transpile_options(optimization_level=3)
+
+    # Execute using Runtime Sampler V2
+    sampler = Sampler(mode=backend_obj)
+    tomo_data = tomo_exp.run(backend_obj, sampler=sampler, shots=4096).block_for_results()
+
+    # Reconstruct density matrix and compute state fidelity
+    rho_fit = tomo_data.analysis_results("state").value
+    target_state = Statevector(input_state_vector)
+    fidelity = state_fidelity(target_state, rho_fit)
+
+    return fidelity, rho_fit
+
+
+# ---------------------------------------------------------------------------
+# 4. Multi-Run Averaging Protocol 
+# ---------------------------------------------------------------------------
+def run_multi_trial_btilde_experiment(input_state_vector, backend_obj, num_trials=5):
+    fidelities = []
+    print(f"Beginning Multi-Run Execution for C-tilde Teleportation (N = {num_trials} trials)...")
+
+    for trial in range(1, num_trials + 1):
+        fid, _ = run_ctilde_teleportation_hardware(input_state_vector, backend_obj)
+        fidelities.append(fid)
+        print(f"  Trial {trial}/{num_trials} Fidelity: {fid:.5f}")
+
+    fidelities = np.array(fidelities)
+
+    # 1. Calculate Mean
+    mean_fidelity = np.mean(fidelities)
+
+    # 2. Calculate Sample Standard Deviation (ddof=1)
+    std_dev = np.std(fidelities, ddof=1)
+
+    # 3. Calculate Standard Error of the Mean (SEM)
+    sem = std_dev / np.sqrt(num_trials)
+
+    return mean_fidelity, std_dev, sem, fidelities
+
+
+# ---------------------------------------------------------------------------
+# 5. Execution & Statistical Results
+# ---------------------------------------------------------------------------
+input_state = [1 / np.sqrt(2), 1 / np.sqrt(2)]  # |+> state
+NUM_TRIALS = 5  # Recommended: 5 to 10 trials
+
+mean_fid, std_fid, sem_fid, raw_fidelities = run_multi_trial_ctilde_experiment(
+    input_state_vector=input_state,
+    backend_obj=backend,
+    num_trials=NUM_TRIALS
+)
+
+# Finite sampling shot-noise theoretical prediction (M = 4096 shots)
+theoretical_shot_noise = np.sqrt(mean_fid * (1 - mean_fid) / 4096)
+
+print("\n" + "=" * 55)
+print("     FINAL EXPERIMENTAL RESULTS & VARIANCE ANALYSIS")
+print("=" * 55)
+print(f"Protocol:                 C-tilde Basis Teleportation")
+print(f"Trials (N):               {NUM_TRIALS}")
+print(f"Shots per Basis (M):      4096")
+print(f"Mean Fidelity (F̄):        {mean_fid:.5f}")
+print(f"Standard Deviation (σ):   {std_fid:.5f}")
+print(f"Standard Error (SEM):     {sem_fid:.5f}")
+print(f"Theoretical Shot Noise:   {theoretical_shot_noise:.5f}")
+print("-" * 55)
+print(f"Primary Report Value (SEM): {mean_fid:.5f} ± {sem_fid:.5f}")
+print(f"Hardware Spread (1σ):       {mean_fid:.5f} ± {std_fid:.5f}")
+print("=" * 55)
+
+
+##############################################################
+# Super dense coding with CNOT and Hadamard gate
+##############################################################
+
+
+import numpy as np
+from qiskit import QuantumCircuit
+from qiskit.quantum_info import Statevector, state_fidelity
+from qiskit_experiments.library import StateTomography
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
+
+# ---------------------------------------------------------------------------
+# 1. Initialize IBM Runtime Service & Select Backend
+# ---------------------------------------------------------------------------
+service = QiskitRuntimeService(
+    channel="ibm_cloud",
+    token="Hvv8-gU_qxAivdlhb_7zSEGvbR2r1m25y_ZLLq9ns9MB",  # Use your 44-character API token
+    instance='crn:v1:bluemix:public:quantum-computing:us-east:a/cd9a703b96a74b68998a150932599a54:b20eac55-e18d-44f3-b492-c36c6dd470ce::' # Use your Instance CRN or 'hub/group/project'
+)
+
+backend = service.backend("ibm_fez")
+print(f"Connected to backend: {backend.name}\n")
+
+
+# ---------------------------------------------------------------------------
+# 2. Hardware Run Function for Superdense Coding
+# ---------------------------------------------------------------------------
+def run_sdc_hardware_tomography(pair, backend_obj, num_shots=10000):
+    # Build the circuit
+    qc = QuantumCircuit(2)
+    
+    # Entanglement preparation
+    qc.h(1)
+    qc.cx(1, 0)
+    qc.barrier()
+    
+    # Alice's encoding
+    if pair[0] == '1': 
+        qc.z(1)
+    if pair[1] == '1': 
+        qc.x(1)
+    qc.barrier()
+    
+    # Bob's decoding
+    qc.cx(1, 0)
+    qc.h(1)
+
+    # Target state for fidelity computation
+    target_state = Statevector.from_label(pair)
+    
+    # Setup State Tomography
+    qst_exp = StateTomography(qc)
+    
+    # Execute using Sampler V2
+    sampler = Sampler(mode=backend_obj)
+    tomo_data = qst_exp.run(backend_obj, sampler=sampler, shots=num_shots).block_for_results()
+    
+    # Extract results
+    rho_fit = tomo_data.analysis_results("state").value
+    fidelity = state_fidelity(target_state, rho_fit)
+    
+    return fidelity, rho_fit
+
+
+# ---------------------------------------------------------------------------
+# 3. Multi-Run Averaging Protocol 
+# ---------------------------------------------------------------------------
+def run_multi_trial_sdc_experiment(pair, backend_obj, num_trials=5, num_shots=10000):
+    fidelities = []
+    print(f"--- Running Message '{pair}' ({num_trials} trials, {num_shots} shots/basis) ---")
+    
+    for trial in range(1, num_trials + 1):
+        fid, _ = run_sdc_hardware_tomography(pair, backend_obj, num_shots=num_shots)
+        fidelities.append(fid)
+        print(f"  Trial {trial}/{num_trials} Fidelity: {fid:.5f}")
+    
+    fidelities = np.array(fidelities)
+    
+    # 1. Calculate Mean
+    mean_fidelity = np.mean(fidelities)
+    
+    # 2. Calculate Sample Standard Deviation (ddof=1 for unbiased estimator)
+    std_dev = np.std(fidelities, ddof=1)
+    
+    # 3. Calculate Standard Error of the Mean (SEM)
+    sem = std_dev / np.sqrt(num_trials)
+    
+    # 4. Compute Theoretical Finite Sampling Shot Noise Limit
+    theoretical_shot_noise = np.sqrt(mean_fidelity * (1 - mean_fidelity) / num_shots)
+    
+    return mean_fidelity, std_dev, sem, theoretical_shot_noise, fidelities
+
+
+# ---------------------------------------------------------------------------
+# 4. Main Execution Loop Across All SDC Messages
+# ---------------------------------------------------------------------------
+NUM_TRIALS = 5    
+SHOTS_PER_BASIS = 10000
+
+summary_results = {}
+
+for p in ['00', '01', '10', '11']:
+    mean_f, std_f, sem_f, shot_f, raw_f = run_multi_trial_sdc_experiment(
+        pair=p, 
+        backend_obj=backend, 
+        num_trials=NUM_TRIALS, 
+        num_shots=SHOTS_PER_BASIS
+    )
+    
+    summary_results[p] = {
+        'mean': mean_f,
+        'std': std_f,
+        'sem': sem_f,
+        'shot_noise': shot_f
+    }
+    print()
+
+# ---------------------------------------------------------------------------
+# 5. Print Statistical Summary Table
+# ---------------------------------------------------------------------------
+print("\n" + "="*70)
+print("              SUPERDENSE CODING EXPERIMENTAL STATISTICAL ANALYSIS")
+print("="*70)
+print(f"{'Message':<10} | {'Mean (F̄)':<12} | {'Std Dev (σ)':<12} | {'SEM (±)':<12} | {'Shot Noise':<12}")
+print("-" * 70)
+
+for p, res in summary_results.items():
+    print(f"  '{p}'     | {res['mean']:.5f}      | {res['std']:.5f}      | {res['sem']:.5f}      | {res['shot_noise']:.5f}")
+
+print("="*70)
+print("\nReported Fidelities for Publication (Mean ± SEM):")
+for p, res in summary_results.items():
+    print(f"Message '{p}': {res['mean']:.5f} ± {res['sem']:.5f}")
+
+
+##############################################################
+# Super dense coding with C-tilde gate
+##############################################################
+
+
+
+import numpy as np
+from qiskit import QuantumCircuit
+from qiskit.circuit.library import SGate, XGate, UnitaryGate
+from qiskit.quantum_info import Operator, Statevector, state_fidelity
+from qiskit_experiments.library import StateTomography
+from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
+
+# ---------------------------------------------------------------------------
+# 1. B-Tilde Operator & Adjoint Decoding Matrix Setup
+# ---------------------------------------------------------------------------
+C = (1 / np.sqrt(2)) * np.array([
+    [-1, 0, 0, 1],
+    [0, 1, 1, 0],
+    [0, 1, -1, 0],
+    [1, 0, 0, 1]
+])
+u_final = UnitaryGate(C, label=r'$\tilde{C}$')
+u_final_dg = u_final.adjoint()
+u_final_dg.label = "C_tilde_dagger"
+
+
+# ---------------------------------------------------------------------------
+# 2. Initialize IBM Runtime Service & Select Backend
+# ---------------------------------------------------------------------------
+service = QiskitRuntimeService(
+    channel="ibm_cloud",
+    token="",  # Use your 44-character API token
+    instance='' # Use your Instance CRN or 'hub/group/project'
+)
+
+# Find the least busy real quantum processor
+backend = service.least_busy(operational=True, simulator=False, min_num_qubits=2)
+backend = service.backend("ibm_fez")
+print(f"Connected to backend: {backend.name}\n")
+
+
+# ---------------------------------------------------------------------------
+# 3. Hardware Run Function for C-Tilde SDC Tomography
+# ---------------------------------------------------------------------------
+def run_btilde_sdc_hardware_tomography(pair, backend_obj, num_shots=10000):
+    # Build the circuit
+    qc = QuantumCircuit(2)
+
+    # Entanglement preparation
+    qc.h(1)
+    qc.cx(1, 0)
+    qc.barrier()
+
+    # Alice's B-tilde Encoding Rules (Applied to Qubit 0)
+    if pair == '00':
+        qc.z(0)
+    elif pair == '01':
+        qc.z(0)
+        qc.x(0)
+    elif pair == '10':
+        qc.x(0)
+    elif pair == '11':
+        pass  # Identity operation
+
+    qc.barrier()
+
+    # Bob's decoding using C-tilde Dagger on qubits [1, 0]
+    qc.append(u_final_dg, [1, 0])
+    qc.barrier()
+
+    # Target state for fidelity computation (basis state corresponding to 'pair')
+    target_state = Statevector.from_label(pair)
+
+    # Setup State Tomography across both qubits
+    qst_exp = StateTomography(qc)
+
+    # Execute using Sampler V2
+    sampler = Sampler(mode=backend_obj)
+    tomo_data = qst_exp.run(backend_obj, sampler=sampler, shots=num_shots).block_for_results()
+
+    # Extract density matrix and compute state fidelity
+    rho_fit = tomo_data.analysis_results("state").value
+    fidelity = state_fidelity(target_state, rho_fit)
+
+    return fidelity, rho_fit
+
+
+# ---------------------------------------------------------------------------
+# 4. Multi-Run Averaging Protocol 
+# ---------------------------------------------------------------------------
+def run_multi_trial_ctilde_sdc(pair, backend_obj, num_trials=5, num_shots=10000):
+    fidelities = []
+    print(f"--- Running C-tilde SDC Message '{pair}' ({num_trials} trials, {num_shots} shots/basis) ---")
+
+    for trial in range(1, num_trials + 1):
+        fid, _ = run_ctilde_sdc_hardware_tomography(pair, backend_obj, num_shots=num_shots)
+        fidelities.append(fid)
+        print(f"  Trial {trial}/{num_trials} Fidelity: {fid:.5f}")
+
+    fidelities = np.array(fidelities)
+
+    # 1. Calculate Mean
+    mean_fidelity = np.mean(fidelities)
+
+    # 2. Calculate Sample Standard Deviation (ddof=1 for unbiased estimator)
+    std_dev = np.std(fidelities, ddof=1)
+
+    # 3. Calculate Standard Error of the Mean (SEM)
+    sem = std_dev / np.sqrt(num_trials)
+
+    # 4. Compute Theoretical Finite Sampling Shot Noise Limit
+    theoretical_shot_noise = np.sqrt(mean_fidelity * (1 - mean_fidelity) / num_shots)
+
+    return mean_fidelity, std_dev, sem, theoretical_shot_noise, fidelities
+
+
+# ---------------------------------------------------------------------------
+# 5. Main Execution Loop Across All SDC Messages
+# ---------------------------------------------------------------------------
+NUM_TRIALS = 5  # Recommended: 5 to 10 independent hardware runs
+SHOTS_PER_BASIS = 10000
+
+summary_results = {}
+
+for p in ['00', '01', '10', '11']:
+    mean_f, std_f, sem_f, shot_f, raw_f = run_multi_trial_ctilde_sdc(
+        pair=p,
+        backend_obj=backend,
+        num_trials=NUM_TRIALS,
+        num_shots=SHOTS_PER_BASIS
+    )
+
+    summary_results[p] = {
+        'mean': mean_f,
+        'std': std_f,
+        'sem': sem_f,
+        'shot_noise': shot_f
+    }
+    print()
+
+# ---------------------------------------------------------------------------
+# 6. Print Statistical Summary Table
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 70)
+print("       C-TILDE SUPERDENSE CODING STATISTICAL ANALYSIS")
+print("=" * 70)
+print(f"{'Message':<10} | {'Mean (F̄)':<12} | {'Std Dev (σ)':<12} | {'SEM (±)':<12} | {'Shot Noise':<12}")
+print("-" * 70)
+
+for p, res in summary_results.items():
+    print(f"  '{p}'     | {res['mean']:.5f}      | {res['std']:.5f}      | {res['sem']:.5f}      | {res['shot_noise']:.5f}")
+
+print("=" * 70)
+print("\nReported Fidelities for Publication (Mean ± SEM):")
+for p, res in summary_results.items():
+    print(f"Message '{p}': {res['mean']:.5f} ± {res['sem']:.5f}")
