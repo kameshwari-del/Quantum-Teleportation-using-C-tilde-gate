@@ -299,8 +299,8 @@ from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2 as Sampler
 # ---------------------------------------------------------------------------
 service = QiskitRuntimeService(
     channel="ibm_cloud",
-    token="Hvv8-gU_qxAivdlhb_7zSEGvbR2r1m25y_ZLLq9ns9MB",  # Use your 44-character API token
-    instance='crn:v1:bluemix:public:quantum-computing:us-east:a/cd9a703b96a74b68998a150932599a54:b20eac55-e18d-44f3-b492-c36c6dd470ce::' # Use your Instance CRN or 'hub/group/project'
+    token="",  # Use your 44-character API token
+    instance='' # Use your Instance CRN or 'hub/group/project'
 )
 
 backend = service.backend("ibm_fez")
